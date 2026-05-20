@@ -1,0 +1,643 @@
+import { SignJWT } from "jose";
+import { authenticator } from "otplib";
+import { jwtVerify } from "jose";
+const cors = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+	"Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
+
+type Env = {
+	SUPABASE_URL: string;
+	SUPABASE_KEY: string;
+	JWT_SECRET: string;
+};
+
+// ================= RESPONSE HELPERS =================
+
+function jsonResponse(body: any, status = 200) {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: { ...cors, "Content-Type": "application/json" }
+	});
+}
+
+// ================= AUTH =================
+
+async function verifyAdmin(request: Request, env: Env) {
+	const auth = request.headers.get("Authorization");
+	if (!auth) return null;
+
+	try {
+		const token = auth.replace("Bearer ", "");
+		const secret = new TextEncoder().encode(env.JWT_SECRET);
+
+		const { payload } = await jwtVerify(token, secret);
+
+		return payload; // ✅ valid user
+	} catch {
+		return null;
+	}
+}
+
+// ================= SUPABASE CALL =================
+
+async function callSupabase(env: Env, path: string, init?: RequestInit) {
+	try {
+		const res = await fetch(`${env.SUPABASE_URL}${path}`, {
+			...init,
+			headers: {
+				apikey: env.SUPABASE_KEY,
+				Authorization: `Bearer ${env.SUPABASE_KEY}`,
+				...(init?.headers || {})
+			}
+		});
+
+		//  handle NO CONTENT (DELETE, etc.)
+		if (res.status === 204) {
+			return null;
+		}
+
+		const text = await res.text();
+
+		//  empty response safety
+		if (!text) {
+			return null;
+		}
+
+		//  parse safely
+		try {
+			return JSON.parse(text);
+		} catch {
+			throw new Error("Invalid JSON from Supabase");
+		}
+	} catch (err: any) {
+		// don't return Response here
+		throw new Error(err.message || "Supabase request failed");
+	}
+}
+
+async function getBody(request: Request) {
+	try {
+		return await request.json();
+	} catch {
+		return null;
+	}
+}
+
+type LoginBody = {
+	email: string;
+	token: string;
+};
+function successResponse(data: any, message = "Success", status = 200) {
+	return new Response(
+		JSON.stringify({
+			success: true,
+			message,
+			data
+		}),
+		{
+			status,
+			headers: { ...cors, "Content-Type": "application/json" }
+		}
+	);
+}
+
+function errorResponse(message: string, status = 400) {
+	return new Response(
+		JSON.stringify({
+			success: false,
+			message
+		}),
+		{
+			status,
+			headers: { ...cors, "Content-Type": "application/json" }
+		}
+	);
+}
+
+
+// ------------------images delete -------------------------
+
+async function deleteImagesFromStorage(env: Env, imageUrls: string[]) {
+	try {
+		const filePaths = imageUrls.map((url) => {
+			const parts = url.split("/storage/v1/object/public/");
+			return parts[1]; // extract path
+		});
+
+		await fetch(`${env.SUPABASE_URL}/storage/v1/object/remove`, {
+			method: "POST",
+			headers: {
+				apikey: env.SUPABASE_KEY,
+				Authorization: `Bearer ${env.SUPABASE_KEY}`,
+				"Content-Type": "application/json"
+			},
+			body: JSON.stringify({
+				bucket: "images",
+				paths: filePaths
+			})
+		});
+	} catch (err) {
+		console.error("Image delete failed:", err);
+	}
+}
+// ================= MAIN =================
+
+export default {
+	async fetch(request: Request, env: Env) {
+		try {
+			if (request.method === "OPTIONS") {
+				return new Response(null, { headers: cors });
+			}
+
+			const url = new URL(request.url);
+
+			// ================= AUTH PROTECTION =================
+
+			const isPublic =
+				request.method === "GET" ||
+				url.pathname === "/api/users/login" ||
+				url.pathname === "/api/users/register" ||
+				url.pathname === "/api/users/2fa/setup" ||
+				url.pathname === "/api/users/2fa/verify-setup";
+
+			if (!isPublic && ["POST", "PATCH", "DELETE"].includes(request.method)) {
+				const admin = await verifyAdmin(request, env);
+				if (!admin) return errorResponse("Unauthorized", 401);
+			}
+
+			// ================= USERS =================
+			if (url.pathname === "/" && request.method === "GET") {
+				return successResponse("API is running 🚀");
+			}
+			if (url.pathname === "/api/users/register" && request.method === "POST") {
+				const body = (await request.json()) as Record<string, any>;
+				if (!body.email) return errorResponse("Email required");
+
+				const result = await callSupabase(env, "/rest/v1/users", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"Prefer": "return=representation"
+					},
+					body: JSON.stringify(body)
+				});
+				return successResponse(result, "User created successfully");
+			}
+
+			if (url.pathname === "/api/users/login" && request.method === "POST") {
+				const body = (await request.json()) as Record<string, any>;
+				if (!body.email || !body.token) {
+					return errorResponse("Email and token required");
+				}
+
+				const res = await fetch(
+					`${env.SUPABASE_URL}/rest/v1/users?email=eq.${body.email}`,
+					{
+						headers: {
+							apikey: env.SUPABASE_KEY,
+							Authorization: `Bearer ${env.SUPABASE_KEY}`
+						}
+					}
+				);
+
+				const text = await res.text();
+
+				let users;
+				try {
+					users = JSON.parse(text);
+				} catch {
+					return errorResponse("Invalid DB response", 500);
+				}
+
+				if (!users || users.length === 0) {
+					return errorResponse("User not found", 404);
+				}
+
+				const user = users[0];
+
+				if (!user.twoFactorSecret) {
+					return errorResponse("2FA not setup", 400);
+				}
+				if (!env.JWT_SECRET) {
+					return errorResponse("JWT_SECRET missing", 500);
+				}
+				const verified = authenticator.check(
+					String(body.token),
+					user.twoFactorSecret
+				);
+
+				if (!verified) return errorResponse("Invalid OTP", 401);
+				if (!env.JWT_SECRET || typeof env.JWT_SECRET !== "string") {
+					return errorResponse("JWT_SECRET invalid", 500);
+				}
+				const secret = new TextEncoder().encode(env.JWT_SECRET);
+
+				const token = await new SignJWT({ id: user.id, role: user.role })
+					.setProtectedHeader({ alg: "HS256" })
+					.setExpirationTime("7d")
+					.sign(secret);
+
+				const { twoFactorSecret, ...safeUser } = user;
+
+				return successResponse(
+					{
+						user: safeUser,
+						token
+					},
+					"Login successful"
+				);
+			}
+
+			if (url.pathname === "/api/users" && request.method === "GET") {
+				const users = await callSupabase(env, "/rest/v1/users?select=*");
+				return successResponse(users, "Users fetched successfully");
+			}
+
+			if (url.pathname.startsWith("/api/users/") && request.method === "GET") {
+				const id = url.pathname.split("/").pop();
+				return await callSupabase(env, `/rest/v1/users?id=eq.${id}`);
+			}
+
+			if (url.pathname.startsWith("/api/users/") && request.method === "PATCH") {
+				const id = url.pathname.split("/").pop();
+				const body = await getBody(request);
+
+				if (!body) {
+					return errorResponse("Invalid or empty JSON body", 400);
+				}
+				return callSupabase(env, `/rest/v1/users?id=eq.${id}`, {
+					method: "PATCH",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(body)
+				});
+			}
+			if (url.pathname === "/api/users/2fa/setup" && request.method === "POST") {
+				const body = (await request.json()) as LoginBody;
+				if (!body || !body.email) {
+					return errorResponse("Email required");
+				}
+
+				// get user
+				const res = await fetch(
+					`${env.SUPABASE_URL}/rest/v1/users?email=eq.${body.email}`,
+					{
+						headers: {
+							apikey: env.SUPABASE_KEY,
+							Authorization: `Bearer ${env.SUPABASE_KEY}`
+						}
+					}
+				);
+
+				const text = await res.text();
+				let users;
+
+				try {
+					users = JSON.parse(text);
+				} catch {
+					return errorResponse("Invalid DB response", 500);
+				}
+
+				if (!users || users.length === 0) {
+					return errorResponse("User not found", 404);
+				}
+
+				const user = users[0];
+
+				if (user.twoFactorEnabled) {
+					return errorResponse("2FA already enabled", 400);
+				}
+
+				// generate secret
+				const secret = authenticator.generateSecret();
+
+				const otpauth_url = authenticator.keyuri(
+					user.email,
+					"Jewelry",
+					secret
+				);
+
+				// save secret
+				const updateRes = await fetch(
+					`${env.SUPABASE_URL}/rest/v1/users?id=eq.${user.id}`,
+					{
+						method: "PATCH",
+						headers: {
+							apikey: env.SUPABASE_KEY,
+							Authorization: `Bearer ${env.SUPABASE_KEY}`,
+							"Content-Type": "application/json",
+							"Prefer": "return=representation"
+						},
+						body: JSON.stringify({
+							twoFactorSecret: (secret)
+						})
+					}
+				);
+
+				const updateText = await updateRes.text();
+
+				// 🔍 DEBUG (VERY IMPORTANT)
+				if (!updateText) {
+					return errorResponse("Failed to save 2FA secret (empty response)", 500);
+				}
+
+				let updatedUser;
+				try {
+					updatedUser = JSON.parse(updateText);
+				} catch {
+					return errorResponse("Invalid DB response while saving 2FA", 500);
+				}
+
+				if (!updatedUser || updatedUser.length === 0) {
+					return errorResponse("2FA secret not saved in DB", 500);
+				}
+
+				return jsonResponse({
+					message: "Scan QR in Google Authenticator",
+					data: {
+						secret: secret,
+						otpauth_url: otpauth_url
+					}
+				});
+			}
+			if (url.pathname === "/api/users/2fa/verify-setup" && request.method === "POST") {
+				const body = (await request.json()) as LoginBody;
+				if (!body || !body.email || !body.token) {
+					return errorResponse("Email and token required");
+				}
+
+				const res = await fetch(
+					`${env.SUPABASE_URL}/rest/v1/users?email=eq.${body.email}`,
+					{
+						headers: {
+							apikey: env.SUPABASE_KEY,
+							Authorization: `Bearer ${env.SUPABASE_KEY}`
+						}
+					}
+				);
+
+				const text = await res.text();
+				let users;
+
+				try {
+					users = JSON.parse(text);
+				} catch {
+					return errorResponse("Invalid DB response", 500);
+				}
+
+				if (!users || users.length === 0) {
+					return errorResponse("User not found", 404);
+				}
+
+				const user = users[0];
+
+				if (!user.twoFactorSecret) {
+					return errorResponse("2FA not started", 400);
+				}
+
+
+				const verified = authenticator.check(
+					String(body.token),
+					user.twoFactorSecret
+				);
+
+				if (!verified) {
+					return errorResponse("Invalid code", 400);
+				}
+
+				// enable 2FA
+				await callSupabase(
+					env,
+					`/rest/v1/users?id=eq.${user.id}`,
+					{
+						method: "PATCH",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({
+							twoFactorEnabled: true
+						})
+					}
+				);
+
+				if (!env.JWT_SECRET || typeof env.JWT_SECRET !== "string") {
+					return errorResponse("JWT_SECRET invalid", 500);
+				}
+				const secret = new TextEncoder().encode(env.JWT_SECRET);
+
+				const token = await new SignJWT({ id: user.id, role: user.role })
+					.setProtectedHeader({ alg: "HS256" })
+					.setExpirationTime("7d")
+					.sign(secret);
+
+				return successResponse(
+					{ token },
+					"2FA enabled"
+				);
+			}
+			// ================= PRODUCTS =================
+
+			if (url.pathname === "/api/products" && request.method === "GET") {
+				if (url.pathname === "/api/products" && request.method === "GET") {
+					const data = await callSupabase(env, "/rest/v1/products?select=*");
+
+					return successResponse(data, "Products fetched successfully");
+				}
+			}
+
+			if (url.pathname.startsWith("/api/products/category/")) {
+				const category = url.pathname.split("/").pop();
+				const result = await callSupabase(env, `/rest/v1/products?category=eq.${category}`);
+				return successResponse(result, `Products in category ${category} fetched successfully`);
+			}
+
+			if (url.pathname.startsWith("/api/products/") && request.method === "GET") {
+				const id = url.pathname.split("/").pop();
+				const result = await callSupabase(env, `/rest/v1/products?id=eq.${id}`);
+				return successResponse(result, "Product fetched successfully");
+			}
+			if (url.pathname === "/api/products" && request.method === "POST") {
+				const body = (await getBody(request)) as Record<string, any>;
+
+				if (!body) {
+					return errorResponse("Invalid or empty JSON body", 400);
+				}
+
+				let images: string[] = [];
+
+				if (Array.isArray(body.imageMeta) && body.imageMeta.length > 0) {
+					images = body.imageMeta.map((img: any) => img.url);
+				}
+
+				else if (Array.isArray(body.images) && body.images.length > 0) {
+					images = body.images;
+				}
+
+				const productPayload = {
+					...body,
+					images
+				};
+
+				const product = await callSupabase(env, "/rest/v1/products", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Prefer: "return=representation"
+					},
+					body: JSON.stringify(productPayload)
+				});
+
+				return successResponse(
+					product?.[0] || product,
+					"Product created successfully"
+				);
+			}
+
+			if (url.pathname.startsWith("/api/products/") && request.method === "PATCH") {
+				const id = url.pathname.split("/").pop();
+				const body = (await getBody(request)) as Record<string, any>;
+
+				if (!body) {
+					return errorResponse("Invalid or empty JSON body", 400);
+				}
+
+				// normalize images (important)
+				const updatedPayload = {
+					...body,
+					images: Array.isArray(body.images)
+						? body.images
+						: []
+				};
+
+				// 🟢 update in Supabase
+				const updated = await callSupabase(
+					env,
+					`/rest/v1/products?id=eq.${id}`,
+					{
+						method: "PATCH",
+						headers: {
+							"Content-Type": "application/json",
+							Prefer: "return=representation" //IMPORTANT
+						},
+						body: JSON.stringify(updatedPayload)
+					}
+				);
+
+				const product = updated?.[0];
+
+				if (!product) {
+					return errorResponse("Product not found", 404);
+				}
+
+				//final response (same as old API)
+				return successResponse(product, "Product updated successfully");
+			}
+
+			if (url.pathname.startsWith("/api/products/") && request.method === "DELETE") {
+				const id = url.pathname.split("/").pop();
+
+				if (!id) {
+					return errorResponse("Product ID required", 400);
+				}
+
+				try {
+					// get product (for images)
+					const existing = await callSupabase(
+						env,
+						`/rest/v1/products?id=eq.${id}&select=*`
+					);
+
+					const product = existing?.[0];
+
+					if (!product) {
+						return errorResponse("Product not found", 404);
+					}
+
+					// delete product
+					await callSupabase(env, `/rest/v1/products?id=eq.${id}`, {
+						method: "DELETE"
+					});
+
+					// optional: delete images
+					if (product.images) {
+						await deleteImagesFromStorage(env, product.images);
+					}
+
+					return successResponse(null, "Product deleted");
+				} catch (err: any) {
+					return errorResponse(err.message, 500);
+				}
+			}
+
+			// ================= PROPERTIES =================
+
+			if (url.pathname === "/api/properties" && request.method === "GET") {
+				return callSupabase(env, "/rest/v1/properties?select=*");
+			}
+
+			if (url.pathname.startsWith("/api/properties/") && request.method === "GET") {
+				const id = url.pathname.split("/").pop();
+				const result = await callSupabase(env, `/rest/v1/properties?id=eq.${id}`);
+				return successResponse(result, "Property fetched successfully");
+			}
+
+			if (url.pathname === "/api/properties" && request.method === "POST") {
+				const body = await getBody(request);
+
+				if (!body) {
+					return errorResponse("Invalid or empty JSON body", 400);
+				} return callSupabase(env, "/rest/v1/properties", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(body)
+				});
+			}
+
+			if (url.pathname.startsWith("/api/properties/") && request.method === "PATCH") {
+				const id = url.pathname.split("/").pop();
+				const body = await getBody(request);
+
+				if (!body) {
+					return errorResponse("Invalid or empty JSON body", 400);
+				}
+				return callSupabase(env, `/rest/v1/properties?id=eq.${id}`, {
+					method: "PATCH",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(body)
+				});
+			}
+
+			if (url.pathname.startsWith("/api/properties/") && request.method === "DELETE") {
+				const id = url.pathname.split("/").pop();
+				return callSupabase(env, `/rest/v1/properties?id=eq.${id}`, {
+					method: "DELETE"
+				});
+			}
+
+			// ================= SITE CONTENT =================
+
+			if (url.pathname === "/api/site-content" && request.method === "GET") {
+				const result = await callSupabase(env, "/rest/v1/site_content?key=eq.main");
+				return successResponse(result, "Site content fetched successfully");
+			}
+
+			if (url.pathname === "/api/site-content" && ["POST", "PUT"].includes(request.method)) {
+				const body = await getBody(request);
+
+				if (!body) {
+					return errorResponse("Invalid or empty JSON body", 400);
+				}
+				const result = await callSupabase(env, "/rest/v1/site_content?key=eq.main", {
+					method: "PATCH",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(body)
+				});
+				return successResponse(result, "Site content updated successfully");
+			}
+
+			return errorResponse("Not Found", 404);
+
+		} catch (err: any) {
+			return errorResponse("Unhandled error: " + err.message, 500);
+		}
+	}
+};
