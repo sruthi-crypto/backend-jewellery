@@ -140,7 +140,6 @@ function errorResponse(message: string, status = 400) {
 	);
 }
 
-
 // ------------------images delete -------------------------
 
 async function deleteImagesFromStorage(env: Env, imageUrls: string[]) {
