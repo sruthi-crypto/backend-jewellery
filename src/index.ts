@@ -644,7 +644,21 @@ export default {
 			return errorResponse("Not Found", 404);
 
 		} catch (err: any) {
-			return errorResponse("Unhandled error: " + err.message, 500);
+			console.error("FULL ERROR", err);
+
+			return new Response(
+				JSON.stringify({
+					success: false,
+					error: err?.message,
+					stack: err?.stack
+				}),
+				{
+					status: 500,
+					headers: {
+						"Content-Type": "application/json"
+					}
+				}
+			);
 		}
 	}
 };
