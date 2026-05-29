@@ -511,6 +511,7 @@ export default {
 					"Jewelry",
 					secret
 				);
+
 				await callSupabase(
 					env,
 					`/rest/v1/users?id=eq.${user.id}`,
