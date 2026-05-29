@@ -1,29 +1,62 @@
-import {
-	env,
-	createExecutionContext,
-	waitOnExecutionContext,
-	SELF,
-} from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
-// For now, you'll need to do something like this to get a correctly-typed
-// `Request` to pass to `worker.fetch()`.
-const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
+const env = {
+	SUPABASE_URL: "https://supabase.test",
+	SUPABASE_KEY: "service-key",
+	JWT_SECRET: "jwt-secret"
+};
 
-describe("Hello World worker", () => {
-	it("responds with Hello World! (unit style)", async () => {
-		const request = new IncomingRequest("http://example.com");
-		// Create an empty context to pass to `worker.fetch()`.
-		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, env, ctx);
-		// Wait for all `Promise`s passed to `ctx.waitUntil()` to settle before running test assertions
-		await waitOnExecutionContext(ctx);
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+describe("API worker", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
 	});
 
-	it("responds with Hello World! (integration style)", async () => {
-		const response = await SELF.fetch("https://example.com");
-		expect(await response.text()).toMatchInlineSnapshot(`"Hello World!"`);
+	it("returns an API status response", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(new Request("http://example.com"), env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			success: true,
+			message: "Success",
+			data: "API is running 🚀"
+		});
+	});
+
+	it("wraps properties list data in a Worker Response", async () => {
+		const fetchMock = vi.fn(async () => {
+			return new Response(JSON.stringify([{ id: 1, title: "Villa" }]), {
+				headers: { "Content-Type": "application/json" }
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request("http://example.com/api/properties"),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(response).toBeInstanceOf(Response);
+		expect(response.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledWith(
+			"https://supabase.test/rest/v1/properties?select=*",
+			expect.objectContaining({
+				headers: expect.objectContaining({
+					apikey: "service-key",
+					Authorization: "Bearer service-key"
+				})
+			})
+		);
+		expect(await response.json()).toEqual({
+			success: true,
+			message: "Properties fetched successfully",
+			data: [{ id: 1, title: "Villa" }]
+		});
 	});
 });

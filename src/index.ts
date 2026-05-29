@@ -257,7 +257,8 @@ export default {
 
 			if (url.pathname.startsWith("/api/users/") && request.method === "GET") {
 				const id = url.pathname.split("/").pop();
-				return await callSupabase(env, `/rest/v1/users?id=eq.${id}`);
+				const result = await callSupabase(env, `/rest/v1/users?id=eq.${id}`);
+				return successResponse(result, "User fetched successfully");
 			}
 
 			if (url.pathname.startsWith("/api/users/") && request.method === "PATCH") {
@@ -267,11 +268,12 @@ export default {
 				if (!body) {
 					return errorResponse("Invalid or empty JSON body", 400);
 				}
-				return callSupabase(env, `/rest/v1/users?id=eq.${id}`, {
+				const result = await callSupabase(env, `/rest/v1/users?id=eq.${id}`, {
 					method: "PATCH",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify(body)
 				});
+				return successResponse(result, "User updated successfully");
 			}
 			if (url.pathname === "/api/users/2fa/setup" && request.method === "POST") {
 				const body = (await request.json()) as LoginBody;
@@ -571,7 +573,8 @@ export default {
 			// ================= PROPERTIES =================
 
 			if (url.pathname === "/api/properties" && request.method === "GET") {
-				return callSupabase(env, "/rest/v1/properties?select=*");
+				const result = await callSupabase(env, "/rest/v1/properties?select=*");
+				return successResponse(result, "Properties fetched successfully");
 			}
 
 			if (url.pathname.startsWith("/api/properties/") && request.method === "GET") {
@@ -585,11 +588,13 @@ export default {
 
 				if (!body) {
 					return errorResponse("Invalid or empty JSON body", 400);
-				} return callSupabase(env, "/rest/v1/properties", {
+				}
+				const result = await callSupabase(env, "/rest/v1/properties", {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify(body)
 				});
+				return successResponse(result, "Property created successfully");
 			}
 
 			if (url.pathname.startsWith("/api/properties/") && request.method === "PATCH") {
@@ -599,18 +604,20 @@ export default {
 				if (!body) {
 					return errorResponse("Invalid or empty JSON body", 400);
 				}
-				return callSupabase(env, `/rest/v1/properties?id=eq.${id}`, {
+				const result = await callSupabase(env, `/rest/v1/properties?id=eq.${id}`, {
 					method: "PATCH",
 					headers: { "Content-Type": "application/json" },
 					body: JSON.stringify(body)
 				});
+				return successResponse(result, "Property updated successfully");
 			}
 
 			if (url.pathname.startsWith("/api/properties/") && request.method === "DELETE") {
 				const id = url.pathname.split("/").pop();
-				return callSupabase(env, `/rest/v1/properties?id=eq.${id}`, {
+				const result = await callSupabase(env, `/rest/v1/properties?id=eq.${id}`, {
 					method: "DELETE"
 				});
+				return successResponse(result, "Property deleted successfully");
 			}
 
 			// ================= SITE CONTENT =================
