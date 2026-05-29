@@ -59,4 +59,32 @@ describe("API worker", () => {
 			data: [{ id: 1, title: "Villa" }]
 		});
 	});
+
+	it("returns a useful error when Supabase sends non-JSON", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				return new Response("<html>Not Found</html>", {
+					status: 404,
+					statusText: "Not Found",
+					headers: { "Content-Type": "text/html" }
+				});
+			})
+		);
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request("http://example.com/api/properties"),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({
+			success: false,
+			message:
+				"Unhandled error: Invalid JSON from Supabase (404 Not Found, text/html): <html>Not Found</html>"
+		});
+	});
 });

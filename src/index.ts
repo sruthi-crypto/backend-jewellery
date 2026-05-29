@@ -44,6 +44,10 @@ async function verifyAdmin(request: Request, env: Env) {
 
 async function callSupabase(env: Env, path: string, init?: RequestInit) {
 	try {
+		if (!env.SUPABASE_URL || !env.SUPABASE_KEY) {
+			throw new Error("Supabase configuration missing");
+		}
+
 		const res = await fetch(`${env.SUPABASE_URL}${path}`, {
 			...init,
 			headers: {
@@ -59,18 +63,38 @@ async function callSupabase(env: Env, path: string, init?: RequestInit) {
 		}
 
 		const text = await res.text();
+		const contentType = res.headers.get("Content-Type") || "unknown";
 
 		//  empty response safety
 		if (!text) {
+			if (!res.ok) {
+				throw new Error(`Supabase ${res.status} ${res.statusText}`);
+			}
 			return null;
 		}
 
 		//  parse safely
+		let data;
 		try {
-			return JSON.parse(text);
+			data = JSON.parse(text);
 		} catch {
-			throw new Error("Invalid JSON from Supabase");
+			const preview = text.replace(/\s+/g, " ").slice(0, 180);
+			throw new Error(
+				`Invalid JSON from Supabase (${res.status} ${res.statusText}, ${contentType}): ${preview}`
+			);
 		}
+
+		if (!res.ok) {
+			const message =
+				typeof data?.message === "string"
+					? data.message
+					: typeof data?.msg === "string"
+						? data.msg
+						: JSON.stringify(data);
+			throw new Error(`Supabase ${res.status} ${res.statusText}: ${message}`);
+		}
+
+		return data;
 	} catch (err: any) {
 		// don't return Response here
 		throw new Error(err.message || "Supabase request failed");
@@ -644,21 +668,8 @@ export default {
 			return errorResponse("Not Found", 404);
 
 		} catch (err: any) {
-			console.error("FULL ERROR", err);
-
-			return new Response(
-				JSON.stringify({
-					success: false,
-					error: err?.message,
-					stack: err?.stack
-				}),
-				{
-					status: 500,
-					headers: {
-						"Content-Type": "application/json"
-					}
-				}
-			);
+			console.error("Unhandled error", err);
+			return errorResponse("Unhandled error: " + err.message, 500);
 		}
 	}
 };
