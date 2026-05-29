@@ -87,4 +87,58 @@ describe("API worker", () => {
 				"Unhandled error: Invalid JSON from Supabase (404 Not Found, text/html): <html>Not Found</html>"
 		});
 	});
+
+	it("returns 400 for invalid register JSON", async () => {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request("http://example.com/api/users/register", {
+				method: "POST",
+				body: "{"
+			}),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			success: false,
+			message: "Invalid or empty JSON body"
+		});
+	});
+
+	it("preserves Supabase conflict status during register", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				return new Response(
+					JSON.stringify({ message: "duplicate key value violates unique constraint" }),
+					{
+						status: 409,
+						statusText: "Conflict",
+						headers: { "Content-Type": "application/json" }
+					}
+				);
+			})
+		);
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request("http://example.com/api/users/register", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ email: "test@example.com" })
+			}),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(409);
+		expect(await response.json()).toEqual({
+			success: false,
+			message:
+				"Supabase 409 Conflict: duplicate key value violates unique constraint"
+		});
+	});
 });

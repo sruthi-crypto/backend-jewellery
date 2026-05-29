@@ -13,6 +13,16 @@ type Env = {
 	JWT_SECRET: string;
 };
 
+class SupabaseRequestError extends Error {
+	status: number;
+
+	constructor(message: string, status: number) {
+		super(message);
+		this.name = "SupabaseRequestError";
+		this.status = status;
+	}
+}
+
 // ================= RESPONSE HELPERS =================
 
 function jsonResponse(body: any, status = 200) {
@@ -91,11 +101,18 @@ async function callSupabase(env: Env, path: string, init?: RequestInit) {
 					: typeof data?.msg === "string"
 						? data.msg
 						: JSON.stringify(data);
-			throw new Error(`Supabase ${res.status} ${res.statusText}: ${message}`);
+			throw new SupabaseRequestError(
+				`Supabase ${res.status} ${res.statusText}: ${message}`,
+				res.status
+			);
 		}
 
 		return data;
 	} catch (err: any) {
+		if (err instanceof SupabaseRequestError) {
+			throw err;
+		}
+
 		// don't return Response here
 		throw new Error(err.message || "Supabase request failed");
 	}
@@ -195,7 +212,8 @@ export default {
 				return successResponse("API is running 🚀");
 			}
 			if (url.pathname === "/api/users/register" && request.method === "POST") {
-				const body = (await request.json()) as Record<string, any>;
+				const body = (await getBody(request)) as Record<string, any> | null;
+				if (!body) return errorResponse("Invalid or empty JSON body", 400);
 				if (!body.email) return errorResponse("Email required");
 
 				const result = await callSupabase(env, "/rest/v1/users", {
@@ -459,6 +477,68 @@ export default {
 					"2FA enabled"
 				);
 			}
+
+			if (url.pathname === "/api/users/2fa/reset" && request.method === "POST") {
+				const admin = await verifyAdmin(request, env);
+
+				if (!admin) {
+					return errorResponse("Unauthorized", 401);
+				}
+
+				if (admin.role !== "admin" && admin.role !== "super_admin") {
+					return errorResponse("Only admin can reset 2FA", 403);
+				}
+
+				const body = (await request.json()) as { email: string };
+
+				if (!body?.email) {
+					return errorResponse("Email required", 400);
+				}
+
+				const users = await callSupabase(
+					env,
+					`/rest/v1/users?email=eq.${encodeURIComponent(body.email)}`
+				);
+
+				if (!users || users.length === 0) {
+					return errorResponse("User not found", 404);
+				}
+
+				const user = users[0];
+
+				const secret = authenticator.generateSecret();
+
+				const otpauth_url = authenticator.keyuri(
+					user.email,
+					"Jewelry",
+					secret
+				);
+
+				await callSupabase(
+					env,
+					`/rest/v1/users?id=eq.${user.id}`,
+					{
+						method: "PATCH",
+						headers: {
+							"Content-Type": "application/json",
+							"Prefer": "return=representation"
+						},
+						body: JSON.stringify({
+							twoFactorSecret: secret,
+							twoFactorEnabled: false // IMPORTANT
+						})
+					}
+				);
+
+				return successResponse(
+					{
+						email: user.email,
+						secret,
+						otpauth_url
+					},
+					"2FA reset successfully. Verify again using /api/users/2fa/verify-setup"
+				);
+			}
 			// ================= PRODUCTS =================
 
 			if (url.pathname === "/api/products" && request.method === "GET") {
@@ -668,6 +748,10 @@ export default {
 
 		} catch (err: any) {
 			console.error("Unhandled error", err);
+			if (err instanceof SupabaseRequestError) {
+				return errorResponse(err.message, err.status);
+			}
+
 			return errorResponse("Unhandled error: " + err.message, 500);
 		}
 	}
