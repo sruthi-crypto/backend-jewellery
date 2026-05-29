@@ -505,9 +505,7 @@ export default {
 				}
 
 				const user = users[0];
-
 				const secret = authenticator.generateSecret();
-
 				const otpauth_url = authenticator.keyuri(
 					user.email,
 					"Jewelry",
