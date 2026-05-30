@@ -1,4 +1,5 @@
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { SignJWT } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
@@ -7,6 +8,15 @@ const env = {
 	SUPABASE_KEY: "service-key",
 	JWT_SECRET: "jwt-secret"
 };
+
+async function adminAuthHeader() {
+	const secret = new TextEncoder().encode(env.JWT_SECRET);
+	const token = await new SignJWT({ id: 1, role: "admin" })
+		.setProtectedHeader({ alg: "HS256" })
+		.sign(secret);
+
+	return `Bearer ${token}`;
+}
 
 describe("API worker", () => {
 	afterEach(() => {
@@ -139,6 +149,70 @@ describe("API worker", () => {
 			success: false,
 			message:
 				"Supabase 409 Conflict: duplicate key value violates unique constraint"
+		});
+	});
+
+	it("updates site content through the real-state alias", async () => {
+		const fetchMock = vi.fn(async () => {
+			return new Response(JSON.stringify([{ key: "main", heroTitle: "Updated" }]), {
+				headers: { "Content-Type": "application/json" }
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request("http://example.com/api/real-state-site-content", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: await adminAuthHeader()
+				},
+				body: JSON.stringify({ heroTitle: "Updated" })
+			}),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledWith(
+			"https://supabase.test/rest/v1/site_content?key=eq.main",
+			expect.objectContaining({
+				method: "PATCH",
+				body: JSON.stringify({ heroTitle: "Updated" })
+			})
+		);
+		expect(await response.json()).toEqual({
+			success: true,
+			message: "Site content updated successfully",
+			data: [{ key: "main", heroTitle: "Updated" }]
+		});
+	});
+
+	it("fetches site content through the real-estate alias", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				return new Response(JSON.stringify([{ key: "main" }]), {
+					headers: { "Content-Type": "application/json" }
+				});
+			})
+		);
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request("http://example.com/api/real-estate-site-content"),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			success: true,
+			message: "Site content fetched successfully",
+			data: [{ key: "main" }]
 		});
 	});
 });

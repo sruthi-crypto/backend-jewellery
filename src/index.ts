@@ -130,6 +130,15 @@ type LoginBody = {
 	email: string;
 	token: string;
 };
+
+function isSiteContentPath(pathname: string) {
+	return [
+		"/api/site-content",
+		"/api/real-state-site-content",
+		"/api/real-estate-site-content"
+	].includes(pathname);
+}
+
 function successResponse(data: any, message = "Success", status = 200) {
 	return new Response(
 		JSON.stringify({
@@ -723,12 +732,12 @@ export default {
 
 			// ================= SITE CONTENT =================
 
-			if (url.pathname === "/api/site-content" && request.method === "GET") {
+			if (isSiteContentPath(url.pathname) && request.method === "GET") {
 				const result = await callSupabase(env, "/rest/v1/site_content?key=eq.main");
 				return successResponse(result, "Site content fetched successfully");
 			}
 
-			if (url.pathname === "/api/site-content" && ["POST", "PUT"].includes(request.method)) {
+			if (isSiteContentPath(url.pathname) && ["POST", "PUT"].includes(request.method)) {
 				const body = await getBody(request);
 
 				if (!body) {
