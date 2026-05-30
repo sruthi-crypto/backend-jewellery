@@ -750,7 +750,6 @@ export default {
 				});
 				return successResponse(result, "Site content updated successfully");
 			}
-
 			return errorResponse("Not Found", 404);
 
 		} catch (err: any) {
