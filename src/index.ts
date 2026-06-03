@@ -139,6 +139,21 @@ function isSiteContentPath(pathname: string) {
 	].includes(pathname);
 }
 
+function getSiteContentTable(pathname: string) {
+	if (pathname === "/api/site-content") {
+		return "site_content";
+	}
+
+	if (
+		pathname === "/api/real-state-site-content" ||
+		pathname === "/api/real-estate-site-content"
+	) {
+		return "realstate_site_content";
+	}
+
+	return null;
+}
+
 function successResponse(data: any, message = "Success", status = 200) {
 	return new Response(
 		JSON.stringify({
@@ -211,7 +226,7 @@ export default {
 				url.pathname === "/api/users/2fa/setup" ||
 				url.pathname === "/api/users/2fa/verify-setup";
 
-			if (!isPublic && ["POST", "PATCH", "DELETE"].includes(request.method)) {
+			if (!isPublic && ["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
 				const admin = await verifyAdmin(request, env);
 				if (!admin) return errorResponse("Unauthorized", 401);
 			}
@@ -732,23 +747,62 @@ export default {
 
 			// ================= SITE CONTENT =================
 
-			if (isSiteContentPath(url.pathname) && request.method === "GET") {
-				const result = await callSupabase(env, "/rest/v1/site_content?key=eq.main");
-				return successResponse(result, "Site content fetched successfully");
-			}
+			const siteContentTable = getSiteContentTable(url.pathname);
+			if (siteContentTable) {
+				const siteContentPath = `/rest/v1/${siteContentTable}?key=eq.main`;
 
-			if (isSiteContentPath(url.pathname) && ["POST", "PUT"].includes(request.method)) {
-				const body = await getBody(request);
-
-				if (!body) {
-					return errorResponse("Invalid or empty JSON body", 400);
+				if (request.method === "GET") {
+					const result = await callSupabase(env, `${siteContentPath}&select=*`);
+					return successResponse(result, "Site content fetched successfully");
 				}
-				const result = await callSupabase(env, "/rest/v1/site_content?key=eq.main", {
-					method: "PATCH",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify(body)
-				});
-				return successResponse(result, "Site content updated successfully");
+
+				if (request.method === "POST") {
+					const body = await getBody(request);
+
+					if (!body) {
+						return errorResponse("Invalid or empty JSON body", 400);
+					}
+
+					const result = await callSupabase(env, `/rest/v1/${siteContentTable}`, {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+							"Prefer": "resolution=merge-duplicates,return=representation"
+						},
+						body: JSON.stringify({
+							key: "main",
+							...(body as Record<string, any>)
+						})
+					});
+					return successResponse(result, "Site content created successfully");
+				}
+
+				if (["PUT", "PATCH"].includes(request.method)) {
+					const body = await getBody(request);
+
+					if (!body) {
+						return errorResponse("Invalid or empty JSON body", 400);
+					}
+					const result = await callSupabase(env, siteContentPath, {
+						method: "PATCH",
+						headers: {
+							"Content-Type": "application/json",
+							"Prefer": "return=representation"
+						},
+						body: JSON.stringify(body)
+					});
+					return successResponse(result, "Site content updated successfully");
+				}
+
+				if (request.method === "DELETE") {
+					const result = await callSupabase(env, siteContentPath, {
+						method: "DELETE",
+						headers: {
+							"Prefer": "return=representation"
+						}
+					});
+					return successResponse(result, "Site content deleted successfully");
+				}
 			}
 			return errorResponse("Not Found", 404);
 
